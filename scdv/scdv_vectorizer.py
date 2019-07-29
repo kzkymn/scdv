@@ -1,5 +1,6 @@
 from gensim.models.word2vec import Word2Vec, MAX_WORDS_IN_BATCH
 
+from sklearn.exceptions import NotFittedError
 from sklearn.feature_extraction.text import BaseEstimator, TransformerMixin, TfidfVectorizer
 from sklearn.mixture import GaussianMixture
 
@@ -141,6 +142,7 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
         self.gmm = GaussianMixture(**self.gmm_params)
         self.n_components = n_components
         self.tfidf_vectorizer = TfidfVectorizer(**self.tfidf_params)
+        self._fitted = False
 
     def __idf_fit_tranform(self, X):
         self.tfidf_vectorizer.fit(X)
@@ -163,18 +165,26 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
 
         return word_dict
 
-    def fit_transform(self, X, y=None, **fit_params):
-        sentences = [self.tokenizer(sentence) for sentence in X]
+    def __check_input(self, raw_documents) -> bool:
+        if isinstance(raw_documents, str):
+            raise TypeError(
+                "The type of raw_documents must be iterable. Not str.")
+        else:
+            return True
+
+    def fit_transform(self, raw_documents, y=None):
+        self.__check_input(raw_documents)
+        sentences = [self.tokenizer(sentence) for sentence in raw_documents]
         # Obtain word vector
         self.train(sentences, total_examples=len(
             sentences), epochs=self.epochs)
         # Calculate idf values
-        vocab, idf_values = self.__idf_fit_tranform(X)
+        vocab, idf_values = self.__idf_fit_tranform(raw_documents)
         # Cluster word vectors using GMM and
         # obtain soft assignment P(cluster_k|word_i)
         gmm_vocab, gmm_clusters, gmm_clust_probas = self.__gmm_fit_predict()
 
-        assert vocab == gmm_vocab
+        assert vocab == vocab & gmm_vocab
 
         # for each word_i in vocabulary do
         word_clust_prob_dict = self.__get_word_dict(gmm_vocab,
@@ -196,16 +206,20 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
             tmp_wtvec_dict[w] = wtvec_i
 
         self.wtvec_dict_ = tmp_wtvec_dict
+        self._fitted = True
+        return self.transform(raw_documents)
 
-        # Calculate and return SCDV using the following method.
-        return self.transform(X)
-
-    def fit(self, X, y=None, **fit_params):
-        self.fit_transform(X, y=y, **fit_params)
+    def fit(self, raw_documents, y=None):
+        self.fit_transform(raw_documents, y)
         return self
 
-    def transform(self, X):
-        sentences = [self.tokenizer(sentence) for sentence in X]
+    def transform(self, raw_documents):
+        if not self._fitted:
+            raise NotFittedError(
+                "This SCDVVectorizer instance is not fitted yet.")
+
+        self.__check_input(raw_documents)
+        sentences = [self.tokenizer(sentence) for sentence in raw_documents]
         docvecs = []
         # for each document_n in X do
         for sentence in sentences:
@@ -218,13 +232,3 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
 
             docvecs.append(docvec_n)
         return np.array(docvecs)
-
-
-if __name__ == "__main__":
-
-    docs = ["わたし は かもめ",
-            "かもめ の ジョナサン",
-            "ファミレス と いう ば ジョナサン"]
-    vectorizer = SCDVVectorizer(docs, window=1, min_count=1)
-    vecs = vectorizer.fit_transform(docs)
-    print(vecs[0])
