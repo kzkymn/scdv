@@ -1,26 +1,25 @@
 from gensim.models.word2vec import Word2Vec, MAX_WORDS_IN_BATCH
-
+import numpy as np
+import pickle
 from sklearn.exceptions import NotFittedError
 from sklearn.feature_extraction.text import BaseEstimator, TransformerMixin, TfidfVectorizer
 from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import normalize
 
-import numpy as np
 
-
-class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
+class SCDVVectorizer(BaseEstimator, TransformerMixin):
     @staticmethod
     def tokenize_simply(text):
         return text.split()
 
     def __init__(self,
-                 sentences=None,
                  size=100,
                  alpha=0.025,
                  window=5,
                  min_count=5,
                  max_vocab_size=None,
                  sample=0.001,
-                 seed=1,
+                 w2v_random_state=1,
                  workers=3,
                  min_alpha=0.0001,
                  sg=0,
@@ -45,7 +44,7 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
                  weights_init=None,
                  means_init=None,
                  precisions_init=None,
-                 random_state=None,
+                 gmm_random_state=None,
                  warm_start=False,
                  verbose=0,
                  verbose_interval=10,
@@ -57,50 +56,52 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
                  preprocessor=None,
                  tokenizer=None,
                  analyzer="word",
-                 stop_words=None,
-                 token_pattern=r"(?u)\b\w\w +\b",
+                 # Some params can't be used cause the tokenization method
+                 # of TfIdfVectorizer must be same as that of Word2Vec.
+                 # For unifying vocabularies between those two objects.
+                 # stop_words=None,
+                 # token_pattern=r"(?u)\b\w\w +\b",
                  ngram_range=(1, 1),
-                 max_df=1.0,
-                 min_df=1,
-                 max_features=None,
-                 vocabulary=None,
+                 # max_df=1.0,
+                 # min_df=1,
+                 # max_features=None,
+                 # vocabulary=None,
                  binary=False,
                  dtype=np.float64,
                  norm="l2",
                  use_idf=True,
                  smooth_idf=True,
-                 sublinear_tf=False):
+                 sublinear_tf=False,
+                 sparsity_percentage=0.01,
+                 l2_normalize=True,
+                 w2v_model_path=None):
 
         if tokenizer is None:
             tokenizer = SCDVVectorizer.tokenize_simply
 
-        sentences = [tokenizer(sentence) for sentence in sentences]
-
-        super().__init__(
-            sentences=sentences,
-            size=size,
-            alpha=alpha,
-            window=window,
-            min_count=min_count,
-            max_vocab_size=max_vocab_size,
-            sample=sample,
-            seed=seed,
-            workers=workers,
-            min_alpha=min_alpha,
-            sg=sg,
-            hs=hs,
-            negative=negative,
-            cbow_mean=cbow_mean,
-            hashfxn=hashfxn,
-            iter=iter,
-            null_word=null_word,
-            trim_rule=trim_rule,
-            sorted_vocab=sorted_vocab,
-            batch_words=batch_words,
-            compute_loss=compute_loss,
-            callbacks=callbacks)
-
         self.tokenizer = tokenizer
+
+        self.w2v_params_except_sentences = {"size": size,
+                                            "alpha": alpha,
+                                            "window": window,
+                                            "min_count": min_count,
+                                            "max_vocab_size": max_vocab_size,
+                                            "sample": sample,
+                                            "seed": w2v_random_state,
+                                            "workers": workers,
+                                            "min_alpha": min_alpha,
+                                            "sg": sg,
+                                            "hs": hs,
+                                            "negative": negative,
+                                            "cbow_mean": cbow_mean,
+                                            "hashfxn": hashfxn,
+                                            "iter": iter,
+                                            "null_word": null_word,
+                                            "trim_rule": trim_rule,
+                                            "sorted_vocab": sorted_vocab,
+                                            "batch_words": batch_words,
+                                            "compute_loss": compute_loss,
+                                            "callbacks": callbacks}
 
         self.gmm_params = {"n_components": n_components,
                            "covariance_type": covariance_type,
@@ -112,7 +113,7 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
                            "weights_init": weights_init,
                            "means_init": means_init,
                            "precisions_init": precisions_init,
-                           "random_state": random_state,
+                           "random_state": gmm_random_state,
                            "warm_start": warm_start,
                            "verbose": verbose,
                            "verbose_interval": verbose_interval}
@@ -123,15 +124,17 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
                              "strip_accents": strip_accents,
                              "lowercase": lowercase,
                              "preprocessor": preprocessor,
-                             "tokenizer": tokenizer,
+                             "tokenizer": self.tokenizer,
                              "analyzer": analyzer,
-                             "stop_words": stop_words,
-                             "token_pattern": token_pattern,
+                             "stop_words": None,
+                             "token_pattern": None,
                              "ngram_range": ngram_range,
-                             "max_df": max_df,
-                             "min_df": min_df,
-                             "max_features": max_features,
-                             "vocabulary": vocabulary,
+                             "max_df": 1.0,
+                             # same as that of Word2Vec
+                             "min_df": min_count,
+                             "max_features": None,
+                             # "vocabulary" will be set later.
+                             # "vocabulary": None,
                              "binary": binary,
                              "dtype": dtype,
                              "norm": norm,
@@ -139,24 +142,23 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
                              "smooth_idf": smooth_idf,
                              "sublinear_tf": sublinear_tf}
 
-        self.gmm = GaussianMixture(**self.gmm_params)
         self.n_components = n_components
-        self.tfidf_vectorizer = TfidfVectorizer(**self.tfidf_params)
-        self._fitted = False
+
+        self.sparsity_percentage = sparsity_percentage
+        self.l2_normalize = l2_normalize
+        self.w2v_model_path = w2v_model_path
 
     def __idf_fit_tranform(self, X):
-        self.tfidf_vectorizer.fit(X)
-        vocab = self.tfidf_vectorizer.get_feature_names()
-        idf_values = self.tfidf_vectorizer._tfidf.idf_
+        self.tfidf_vectorizer_.fit(X)
+        vocab = self.tfidf_vectorizer_.get_feature_names()
+        idf_values = self.tfidf_vectorizer_._tfidf.idf_
         return set(vocab), idf_values
 
     def __gmm_fit_predict(self):
-        wv = []
-        for w in self.wv.vocab:
-            wv.append(self.wv[w])
-        clusters = self.gmm.fit_predict(wv)
-        clust_probas = self.gmm.predict_proba(wv)
-        return set(self.wv.vocab), clusters, clust_probas
+        wv = [self.w2v_model_.wv[w] for w in self.w2v_model_.wv.vocab]
+        clusters = self.gmm_.fit_predict(wv)
+        clust_probas = self.gmm_.predict_proba(wv)
+        return set(self.w2v_model_.wv.vocab), clusters, clust_probas
 
     def __get_word_dict(self, vocab, values):
         word_dict = dict()
@@ -172,19 +174,37 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
         else:
             return True
 
+    def __check_is_fitted(self):
+        if self._fitted_ is None or not self._fitted_:
+            raise NotFittedError(
+                "This SCDVVectorizer instance is not fitted yet.")
+
     def fit_transform(self, raw_documents, y=None):
         self.__check_input(raw_documents)
         sentences = [self.tokenizer(sentence) for sentence in raw_documents]
-        # Obtain word vector
-        self.train(sentences, total_examples=len(
-            sentences), epochs=self.epochs)
+
+        if self.w2v_model_path is None:
+            self.w2v_model_ = Word2Vec(
+                sentences=sentences,
+                **self.w2v_params_except_sentences)
+            # Obtain word vector
+            self.w2v_model_.train(sentences,
+                                  total_examples=len(sentences),
+                                  epochs=self.w2v_model_.epochs)
+        else:
+            # use pretrained word vectors
+            self.w2v_model_ = Word2Vec.load(self.w2v_model_path)
+
         # Calculate idf values
+        self.tfidf_params["vocabulary"] = list(self.w2v_model_.wv.vocab.keys())
+        self.tfidf_vectorizer_ = TfidfVectorizer(**self.tfidf_params)
         vocab, idf_values = self.__idf_fit_tranform(raw_documents)
         # Cluster word vectors using GMM and
         # obtain soft assignment P(cluster_k|word_i)
+        self.gmm_ = GaussianMixture(**self.gmm_params)
         gmm_vocab, gmm_clusters, gmm_clust_probas = self.__gmm_fit_predict()
 
-        assert vocab == vocab & gmm_vocab
+        assert vocab == gmm_vocab
 
         # for each word_i in vocabulary do
         word_clust_prob_dict = self.__get_word_dict(gmm_vocab,
@@ -196,7 +216,7 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
             clust_prob_array = word_clust_prob_dict[w]
             for p_ck_wi in clust_prob_array:
                 # Calc wordvec_i * P(cluster_k|word_i) as wcvec_ik
-                wcvec_ik = self.wv[w] * p_ck_wi
+                wcvec_ik = self.w2v_model_.wv[w] * p_ck_wi
                 wcvec.append(wcvec_ik)
 
             # Calc idf(word_i) * concat(wcvec_i1 to wcvec_ik) as wtvec_i
@@ -206,29 +226,60 @@ class SCDVVectorizer(Word2Vec, BaseEstimator, TransformerMixin):
             tmp_wtvec_dict[w] = wtvec_i
 
         self.wtvec_dict_ = tmp_wtvec_dict
-        self._fitted = True
+        self._fitted_ = True
+
         return self.transform(raw_documents)
 
     def fit(self, raw_documents, y=None):
         self.fit_transform(raw_documents, y)
         return self
 
-    def transform(self, raw_documents):
-        if not self._fitted:
-            raise NotFittedError(
-                "This SCDVVectorizer instance is not fitted yet.")
-
+    def __create_scdv_document_vectors(self, raw_documents):
         self.__check_input(raw_documents)
+
         sentences = [self.tokenizer(sentence) for sentence in raw_documents]
         docvecs = []
         # for each document_n in X do
         for sentence in sentences:
             # init docvec_n as zero vectors
-            docvec_n = np.zeros(self.wv.vector_size * self.n_components)
+            docvec_n = np.zeros(
+                self.w2v_model_.wv.vector_size * self.n_components)
             # for each word_i in document_n do
             for w in sentence:
-                wtvec_i = self.wtvec_dict_[w]
-                docvec_n += wtvec_i
+                if w in self.wtvec_dict_:
+                    wtvec_i = self.wtvec_dict_[w]
+                    docvec_n += wtvec_i
 
             docvecs.append(docvec_n)
+
         return np.array(docvecs)
+
+    def __calc_sparsity_threshold(self, docvecs):
+        min_max_averages = [0.5 * (np.abs(np.min(d)) + np.abs(np.max(d)))
+                            for d in docvecs]
+        average = np.mean(min_max_averages)
+        return self.sparsity_percentage * average
+
+    def __sparsify_vectors(self, docvecs):
+        sparsify_threshold = self.__calc_sparsity_threshold(docvecs)
+        return np.where(
+            np.abs(docvecs) < sparsify_threshold, 0.0, docvecs)
+
+    def transform(self, raw_documents):
+        self.__check_is_fitted()
+        docvecs = self.__create_scdv_document_vectors(raw_documents)
+        docvecs = self.__sparsify_vectors(docvecs)
+
+        if self.l2_normalize:
+            docvecs = normalize(docvecs, axis=1, norm="l2")
+
+        return docvecs
+
+    def save(self, file_path: str) -> None:
+        with open(file_path, "wb") as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load(file_path: str):
+        with open(file_path, "rb") as f:
+            return pickle.load(f)
