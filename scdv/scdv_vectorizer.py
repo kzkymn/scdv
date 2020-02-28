@@ -180,6 +180,10 @@ class SCDVVectorizer(BaseEstimator, TransformerMixin):
                 "This SCDVVectorizer instance is not fitted yet.")
 
     def fit_transform(self, raw_documents, y=None):
+        # The following field is for normalizing vectors.
+        # And its value is to be assigned the later sequences.
+        self._sparsity_parameter = None
+
         self.__check_input(raw_documents)
         sentences = [self.tokenizer(sentence) for sentence in raw_documents]
 
@@ -255,10 +259,11 @@ class SCDVVectorizer(BaseEstimator, TransformerMixin):
         return np.array(docvecs)
 
     def __calc_sparsity_threshold(self, docvecs):
-        min_max_averages = [0.5 * (np.abs(np.min(d)) + np.abs(np.max(d)))
-                            for d in docvecs]
-        average = np.mean(min_max_averages)
-        return self.sparsity_percentage * average
+        if self._sparsity_parameter is None:
+            min_max_averages = [
+                0.5 * (np.abs(np.min(d)) + np.abs(np.max(d))) for d in docvecs]
+            self._sparsity_parameter = np.mean(min_max_averages)
+        return self.sparsity_percentage * self._sparsity_parameter
 
     def __sparsify_vectors(self, docvecs):
         sparsify_threshold = self.__calc_sparsity_threshold(docvecs)
